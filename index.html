@@ -539,9 +539,9 @@ function vBulk() {
     const U = UPLOAD.bulk, tc = guessText(U.headers), s = settings();
     const mapNotes = [], auto = autoTruthMap(U.headers, U.rows, mapNotes);
     $("#bmap").innerHTML = `<h2>列の対応を確認</h2><p>${esc(U.name)}（シート：${esc(U.sheet)}）… ${U.rows.length}行</p>
-    <div class="card"><p><label>記述の列：<select id="tcol">${U.headers.map(h => `<option ${h === tc ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label></p>
+    <div class="card"><p><label>記述の列：<select id="tcol">${U.headers.map((h, i) => `<option value="h:${i}" ${h === tc ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label></p>
     <h3>正解として照合する列（選択肢のある項目）</h3>${mapNotes.map(m => `<p class="ng">${esc(m)}</p>`).join("")}<table style="max-width:640px">
-    ${CFG.ITEMS.filter(i => i.kind === "enum").map(it => `<tr><th style="width:160px">${esc(it.key)}</th><td><select data-truth="${esc(it.key)}"><option value="">（照合しない）</option>${CFG.RULE_REF_ITEMS.includes(it.key) ? `<option value="${CFG.RULE_REF}" ${auto[it.key] === CFG.RULE_REF ? "selected" : ""}>（記述から規則で作る参照値・要人手確認）</option>` : ""}${U.headers.map(h => `<option ${auto[it.key] === h ? "selected" : ""}>${esc(h)}</option>`).join("")}</select>${it.empty_truth ? ` <span class="muted">空欄＝${esc(it.empty_truth)}として照合</span>` : ""}</td></tr>`).join("")}</table>
+    ${CFG.ITEMS.filter(i => i.kind === "enum").map(it => `<tr><th style="width:160px">${esc(it.key)}</th><td><select data-truth="${esc(it.key)}"><option value="">（照合しない）</option>${CFG.RULE_REF_ITEMS.includes(it.key) ? `<option value="${CFG.RULE_REF}" ${auto[it.key] === CFG.RULE_REF ? "selected" : ""}>（記述から規則で作る参照値・要人手確認）</option>` : ""}${U.headers.map((h, i) => `<option value="h:${i}" ${auto[it.key] === h ? "selected" : ""}>${esc(h)}</option>`).join("")}</select>${it.empty_truth ? ` <span class="muted">空欄＝${esc(it.empty_truth)}として照合</span>` : ""}</td></tr>`).join("")}</table>
     <p class="muted">治療は、正解列が無ければ記述から規則で作った参照値（補綴と抜歯→抜歯→歯科補綴、補綴→歯科補綴、抜歯→抜歯のみ、再植など→その他、無し→記載なし）と照合します。参照値は結果Excelの列に出るので、人手で確かめてください。原因・処置は自動照合せず、人手判定用Excel（版を伏せたもの）で判定します。「版」「症例ID」の列があれば、形式指定と指定なしの対の比較も計算します。</p>
     <div class="row"><label>実行回数 <select id="rep"><option>1</option><option>2</option><option selected>3</option></select></label>
     <label><input type="number" id="st0" min="1" max="${U.rows.length}" value="1" style="width:80px"> 件目から</label>
@@ -552,10 +552,12 @@ function vBulk() {
     <h3>先頭5行</h3><div class="scroll"><table><tr>${U.headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr>${U.rows.slice(0, 5).map(r => `<tr>${U.headers.map(h => `<td>${esc(r[h] ?? "")}</td>`).join("")}</tr>`).join("")}</table></div>`;
     $("#start").onclick = () => {
       const s = settings(); if (!s.key) { flash("先に設定でAPIキーを入力してください。", true); return; }
-      const tm = {}; document.querySelectorAll("[data-truth]").forEach(el => { if (el.value) tm[el.dataset.truth] = el.value; });
+      // 選択肢の値は列の番号（h:3）。列名に改行があっても、ブラウザの空白の詰め直しで名前が変わらないようにするため
+      const colOf = v => /^h:\d+$/.test(v) ? U.headers[+v.slice(2)] : v;
+      const tm = {}; document.querySelectorAll("[data-truth]").forEach(el => { if (el.value) tm[el.dataset.truth] = colOf(el.value); });
       const st0 = Math.max(1, parseInt($("#st0").value) || 1); if (st0 > U.rows.length) { flash(`開始の番号（${st0}）がデータの件数（${U.rows.length}件）を超えています。`, true); return; }
       const lim = parseInt($("#lim").value); const rest = U.rows.slice(st0 - 1); const rows = lim > 0 ? rest.slice(0, lim) : rest;
-      const job = { id: Math.random().toString(16).slice(2, 10), filename: U.name, headers: U.headers, rows, offset: st0 - 1, text_col: $("#tcol").value, truth_map: tm,
+      const job = { id: Math.random().toString(16).slice(2, 10), filename: U.name, headers: U.headers, rows, offset: st0 - 1, text_col: colOf($("#tcol").value), truth_map: tm,
         repeats: +$("#rep").value, settings: Object.fromEntries(Object.entries(s).filter(([k]) => k !== "key")), prompt_version: CFG.PROMPT_VERSION, results: new Map(), status: "実行中", done: 0, total: rows.length * +$("#rep").value, errors: 0, started: nowUTC(), finished: null, stop: false, log: [] };
       JOBS.push(job); saveJobs(); runJob(job, false); location.hash = "#job/" + job.id;
     };
@@ -940,10 +942,10 @@ function vJaccard(args) {
    <input type="file" id="jf" accept=".xlsx,.xlsm,.csv"><p><button class="btn" id="jl">読み込む</button></p></div>
    <div class="card"><h3>DBの記録を使う</h3><p class="muted">新規登録で確定保存した ${DB.all().length} 件。構造化項目は人が確認した確定値を使います。</p><a class="btn o" href="#jaccard/db">DBの記録で解析</a></div></div>` : `
   <div class="card"><p><b>${esc(U.name)}</b>（${U.rows.length}行） <a href="#" id="jother" class="muted">別のファイル</a></p>
-   <div class="row"><label>記述の列 <select id="jtc">${U.headers.map(h => `<option ${h === tc ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label>
-   <label>絞り込み <select id="jfc"><option value="">（しない）</option>${U.headers.map(h => `<option ${F.filter_col === h ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label>
+   <div class="row"><label>記述の列 <select id="jtc">${U.headers.map((h, i) => `<option value="h:${i}" ${h === tc ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label>
+   <label>絞り込み <select id="jfc"><option value="">（しない）</option>${U.headers.map((h, i) => `<option value="h:${i}" ${F.filter_col === h ? "selected" : ""}>${esc(h)}</option>`).join("")}</select></label>
    <label>＝ <input type="text" id="jfv" value="${esc(F.filter_val || "")}" placeholder="例：歯牙障害"></label></div>
-   <h3>構造化項目（列＝値 を特徴にする）</h3><div class="row">${U.headers.filter(h => h !== tc).map(h => `<label style="white-space:nowrap"><input type="checkbox" class="jst" value="${esc(h)}" ${sg.includes(h) ? "checked" : ""}> ${esc(h)}</label>`).join("")}</div>
+   <h3>構造化項目（列＝値 を特徴にする）</h3><div class="row">${U.headers.map((h, i) => h === tc ? "" : `<label style="white-space:nowrap"><input type="checkbox" class="jst" value="h:${i}" ${sg.includes(h) ? "checked" : ""}> ${esc(h)}</label>`).join("")}</div>
    <h3>原文語（記述に含まれるかを見る語）</h3><input type="text" id="jfo" value="${esc(F.focus)}" style="width:100%">
    <h3>辞書カテゴリ（1行に「カテゴリ名: 語, 語, …」）</h3><textarea id="jdi" style="min-height:170px;font-family:monospace">${esc(F.dict)}</textarea>
    <p class="muted">既定の辞書は例です。抄録で使った辞書がある場合は、それに置き換えてください（結果は辞書の中身で変わります）。</p>
@@ -960,7 +962,8 @@ function vJaccard(args) {
   $("#jother").onclick = e => { e.preventDefault(); UPLOAD.jac = null; JRES = null; location.hash = "#jaccard"; vJaccard([]); };
   $("#jrun").onclick = async () => {
     $("#jrun").disabled = true; $("#jwait").classList.remove("hidden");
-    const form = { text_col: $("#jtc").value, filter_col: $("#jfc").value, filter_val: $("#jfv").value.trim(), struct: [...document.querySelectorAll(".jst:checked")].map(e => e.value),
+    const colOf = v => /^h:\d+$/.test(v) ? U.headers[+v.slice(2)] : v;   // 値は列の番号（列名の改行がブラウザで変わらないように）
+    const form = { text_col: colOf($("#jtc").value), filter_col: colOf($("#jfc").value), filter_val: $("#jfv").value.trim(), struct: [...document.querySelectorAll(".jst:checked")].map(e => colOf(e.value)),
       focus: $("#jfo").value, dict: $("#jdi").value, stop: $("#jsw").value, topn: +$("#jtn").value || 0, min_count: +$("#jmc").value || 1, pos: [...document.querySelectorAll(".jpos:checked")].map(e => e.value) };
     const tok = form.topn > 0 ? await loadKuromoji() : null;
     const docs = [];
