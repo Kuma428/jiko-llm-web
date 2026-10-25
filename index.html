@@ -518,9 +518,13 @@ function vBulk() {
   <div class="card"><h3>作成症例（対の症例）</h3><p class="muted">同じ正解カードから「指定なし」「形式指定」の2つの文を作り、同じ症例IDを付けたExcelを読み込むと、対の比較（主要解析）を計算します。</p>
    <button class="btn o" id="tplx">作成症例のExcelひな形</button></div></div>
   <div id="bmap"></div>
-  ${JOBS.length ? `<h3>この画面を開いている間の実行</h3><div class="scroll"><table><tr><th>ID</th><th>ファイル</th><th>状態</th><th class="num">進み</th><th class="num">失敗</th><th>開始(UTC)</th></tr>
-   ${JOBS.slice().reverse().map(j => `<tr><td><a href="#job/${j.id}">${j.id}</a></td><td>${esc(j.filename)}</td><td>${esc(j.status)}</td><td class="num">${j.done}/${j.total}</td><td class="num">${j.errors}</td><td>${j.started}</td></tr>`).join("")}</table></div>
-   <p class="muted">ページを閉じる・再読み込みすると実行は止まり、この一覧も消えます。終わったら結果Excelを保存してください。</p>` : ""}`;
+  ${JOBS.length ? `<h3>このブラウザに保存された実行</h3><div class="scroll"><table><tr><th>ID</th><th>ファイル</th><th>範囲</th><th>状態</th><th class="num">進み</th><th class="num">失敗</th><th>開始(UTC)</th><th></th></tr>
+   ${JOBS.slice().reverse().map(j => `<tr><td><a href="#job/${j.id}">${j.id}</a></td><td>${esc(j.filename)}</td><td>${(j.offset || 0) + 1}〜${(j.offset || 0) + j.rows.length}件目×${j.repeats}回</td><td>${esc(j.status)}</td><td class="num">${j.done}/${j.total}</td><td class="num">${j.errors}</td><td>${j.started}</td><td>${j.status === "実行中" ? "" : `<button class="btn o sm" data-jdel="${j.id}">削除</button>`}</td></tr>`).join("")}</table></div>
+   <p class="muted">結果は1件ごとにこのブラウザに保存されます（使用量 約${savedSizeMB()}MB、上限はおよそ5MB）。ページを閉じたり再読み込みしたりすると実行は止まりますが、その実行を開いて「続きから再開」を押せば、残りだけを流します。保存はこの端末のこのブラウザだけなので、終わったら結果Excelを保存し、不要になった実行は削除してください。</p>` : ""}`;
+  V.querySelectorAll("[data-jdel]").forEach(b => b.onclick = () => {
+    if (b.dataset.armed) { const i = JOBS.findIndex(j => j.id === b.dataset.jdel); if (i >= 0) JOBS.splice(i, 1); saveJobs(); vBulk(); return; }
+    b.dataset.armed = "1"; b.textContent = "もう一度押すと削除";
+  });
   $("#tplx").onclick = () => {
     const enumK = CFG.ITEMS.filter(i => i.kind === "enum").map(i => i.key);
     const heads = ["症例ID", "版", "作成", "災害発生時の状況", ...enumK];
@@ -552,8 +556,8 @@ function vBulk() {
       const st0 = Math.max(1, parseInt($("#st0").value) || 1); if (st0 > U.rows.length) { flash(`開始の番号（${st0}）がデータの件数（${U.rows.length}件）を超えています。`, true); return; }
       const lim = parseInt($("#lim").value); const rest = U.rows.slice(st0 - 1); const rows = lim > 0 ? rest.slice(0, lim) : rest;
       const job = { id: Math.random().toString(16).slice(2, 10), filename: U.name, headers: U.headers, rows, offset: st0 - 1, text_col: $("#tcol").value, truth_map: tm,
-        repeats: +$("#rep").value, settings: s, prompt_version: CFG.PROMPT_VERSION, results: new Map(), status: "実行中", done: 0, total: rows.length * +$("#rep").value, errors: 0, started: nowUTC(), finished: null, stop: false, log: [] };
-      JOBS.push(job); runJob(job, false); location.hash = "#job/" + job.id;
+        repeats: +$("#rep").value, settings: Object.fromEntries(Object.entries(s).filter(([k]) => k !== "key")), prompt_version: CFG.PROMPT_VERSION, results: new Map(), status: "実行中", done: 0, total: rows.length * +$("#rep").value, errors: 0, started: nowUTC(), finished: null, stop: false, log: [] };
+      JOBS.push(job); saveJobs(); runJob(job, false); location.hash = "#job/" + job.id;
     };
   };
 }
@@ -575,23 +579,51 @@ function autoTruthMap(headers, rows, notes) {
   return m;
 }
 window.addEventListener("beforeunload", e => { if (JOBS.some(j => j.status === "実行中")) { e.preventDefault(); e.returnValue = ""; } });
-async function runJob(job, onlyFailed) {
-  job.stop = false; job.status = "実行中"; const s = job.settings;
+async function runJob(job, mode) {
+  // mode：false＝全件、true＝失敗した分だけ、"resume"＝まだ結果の無い分だけ（中断からの再開）
+  const key = settings().key; if (!key) { job.status = "停止"; job.log.push("APIキーが入っていません。設定で入力してから再開してください。"); saveJobs(); refreshJob(job, true); return; }
+  job.stop = false; job.status = "実行中"; job.log = job.log.filter(l => !/APIキーが入っていません/.test(l));
+  const s = Object.assign({}, job.settings, { key });   // モデル・思考レベル・間隔は実行を始めたときの設定のまま。キーは保存しない
   let tasks = []; for (let run = 1; run <= job.repeats; run++) for (let i = 0; i < job.rows.length; i++) tasks.push([i, run]);
-  if (onlyFailed) { tasks = tasks.filter(([i, r]) => (job.results.get(rkey(i, r)) || {}).error); job.done = job.total - tasks.length; }
+  if (mode === true) { tasks = tasks.filter(([i, r]) => (job.results.get(rkey(i, r)) || {}).error); job.done = job.total - tasks.length; }
+  if (mode === "resume") { tasks = tasks.filter(([i, r]) => !job.results.has(rkey(i, r))); job.done = job.results.size; }
+  saveJobs();
   for (const [i, run] of tasks) {
-    if (job.stop) { job.status = "停止"; refreshJob(job); return; }
+    if (job.stop) { job.status = "停止"; saveJobs(); refreshJob(job, true); return; }
     const text = String(job.rows[i][job.text_col] ?? ""); const res = { run, time: nowUTC() };
     if (!text.trim()) res.error = "記述が空";
     else {
       try { const [raw, meta] = await classifyRetry(text, s, 4, (w, m) => { job.waiting = `${m}（${w}秒待機）`; refreshJob(job); }); job.waiting = ""; Object.assign(res, { raw, meta, post: postprocess(text, raw) }); }
-      catch (e) { res.error = e.message; if (/キー|見つかりません|入っていません/.test(e.message)) { job.results.set(rkey(i, run), res); job.status = "停止（エラー）"; job.log.push(e.message); refreshJob(job); return; } }
+      catch (e) { res.error = e.message; if (/キー|見つかりません|入っていません/.test(e.message)) { job.results.set(rkey(i, run), res); job.status = "停止（エラー）"; job.log.push(e.message); saveJobs(); refreshJob(job, true); return; } }
     }
-    job.results.set(rkey(i, run), res); job.done++; job.errors = [...job.results.values()].filter(v => v.error).length; refreshJob(job);
+    job.results.set(rkey(i, run), res); job.done++; job.errors = [...job.results.values()].filter(v => v.error).length; saveJobs(); refreshJob(job);
     if (s.interval_sec > 0) await sleep(s.interval_sec * 1000);
   }
-  job.status = "完了"; job.finished = nowUTC(); refreshJob(job, true);
+  job.status = "完了"; job.finished = nowUTC(); saveJobs(); refreshJob(job, true);
 }
+/* 実行の保存：1件終わるごとにこのブラウザ（localStorage）へ。APIキーと AI の生の応答は保存しない */
+const JOB_STORE = "jiko_jobs_v1";
+let SAVE_FAILED = false;
+function jobForSave(j) {
+  const o = {}; for (const k of ["id", "filename", "headers", "rows", "offset", "text_col", "truth_map", "repeats", "settings", "prompt_version", "status", "done", "total", "errors", "started", "finished", "log"]) o[k] = j[k];
+  o.settings = Object.fromEntries(Object.entries(j.settings || {}).filter(([k]) => k !== "key"));
+  o.results = [...j.results].map(([k, v]) => { const c = Object.assign({}, v); delete c.raw; return [k, c]; });
+  return o;
+}
+function saveJobs() {
+  try { localStorage.setItem(JOB_STORE, JSON.stringify(JOBS.map(jobForSave))); if (SAVE_FAILED) { SAVE_FAILED = false; JOBS.forEach(j => { j.log = j.log.filter(l => !l.startsWith("ブラウザへの保存")); }); } return true; }
+  catch (e) {
+    if (!SAVE_FAILED) { SAVE_FAILED = true; JOBS.filter(j => j.status === "実行中").forEach(j => j.log.push("ブラウザへの保存に失敗しました（容量不足の可能性）。一括分類の画面で古い実行を削除してください。実行は続いていますが、ページを閉じると消えます。")); }
+    return false;
+  }
+}
+function loadJobs() {
+  try {
+    const a = JSON.parse(localStorage.getItem(JOB_STORE) || "[]");
+    for (const j of a) { j.results = new Map(j.results); j.stop = false; j.done = j.results.size; if (j.status === "実行中") j.status = "中断"; JOBS.push(j); }
+  } catch (e) { }
+}
+function savedSizeMB() { try { return ((localStorage.getItem(JOB_STORE) || "").length * 2 / 1048576).toFixed(1); } catch (e) { return "?"; } }
 function refreshJob(job, full) {
   if (location.hash !== "#job/" + job.id) return;
   if (full) { vJob([job.id]); return; }
@@ -767,10 +799,12 @@ function vJob(args) {
   V.innerHTML = `<h2>一括分類 ${job.id}</h2><p>${esc(job.filename)}／${(job.offset || 0) + 1}〜${(job.offset || 0) + job.rows.length}件目（${job.rows.length}行） × ${job.repeats}回／gemini：${esc(s.gemini_model)}／${job.prompt_version}</p>
   <div class="card"><div class="row"><b id="jst">${esc(job.status)}</b> <span id="jpg">${job.done}/${job.total}</span> 失敗 <span id="jer">${job.errors}</span> <span class="muted" id="jwait"></span></div>
   <div class="bar" style="margin:10px 0"><i id="jbar" style="width:${job.total ? 100 * job.done / job.total : 0}%"></i></div>
-  <div class="row"><button class="btn o sm" id="jstop">停止</button><button class="btn o sm" id="jretry">失敗した分だけ再実行</button>
+  ${job.status === "中断" || (job.status === "停止" && job.done < job.total) ? `<p class="ng">${job.status === "中断" ? "ページを閉じた・再読み込みしたため中断しています。" : "停止しています。"}結果は${job.done}/${job.total}件まで保存済みです。「続きから再開」で残りの${job.total - job.done}件だけを流します（モデル・思考レベル・間隔は開始時の設定のまま）。</p>` : ""}
+  <div class="row">${job.status === "中断" || (job.status === "停止" && job.done < job.total) ? `<button class="btn sm" id="jresume">続きから再開</button>` : ""}<button class="btn o sm" id="jstop">停止</button><button class="btn o sm" id="jretry">失敗した分だけ再実行</button>
   <button class="btn sm" id="jres">結果Excel</button><button class="btn o sm" id="jjudge">人手判定用Excel（原因・処置）</button></div>
   ${job.log.map(l => `<p class="ng">${esc(l)}</p>`).join("")}</div><div id="jev">${evalHTML(job)}</div>`;
   $("#jstop").onclick = () => { job.stop = true; };
+  const rb = document.getElementById("jresume"); if (rb) rb.onclick = () => { if (job.status !== "実行中") { runJob(job, "resume"); vJob([job.id]); } };
   $("#jretry").onclick = () => { if (job.status !== "実行中") { runJob(job, true); vJob([job.id]); } };
   $("#jres").onclick = () => resultExcel(job);
   $("#jjudge").onclick = () => judgeExcel(job);
@@ -1002,6 +1036,7 @@ function vSettings() {
     } catch (e) { o.textContent = "失敗：" + e.message; } };
 }
 
+loadJobs();
 route();
 </script>
 </body>
